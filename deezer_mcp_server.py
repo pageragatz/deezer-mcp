@@ -3,9 +3,10 @@ Deezer MCP Server
 Provides search, retrieval, and exploration of music content via the Deezer API.
 """
 
+import asyncio
 import logging
 import os
-from typing import Dict, Any, Optional, Annotated
+from typing import Dict, Any, Optional
 import aiohttp
 from fastmcp import FastMCP
 from pydantic import BaseModel, Field, field_validator
@@ -17,8 +18,7 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP("Deezer Music Server")
 
 BASE_URL = "https://api.deezer.com"
-DEFAULT_LIMIT = 10
-MAX_SEARCH_LIMIT = 25
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=15)
 
 VALID_ORDERS = [
     "RANKING", "TRACK_ASC", "TRACK_DESC", "ARTIST_ASC", "ARTIST_DESC",
@@ -78,6 +78,8 @@ async def make_api_request(session: aiohttp.ClientSession, endpoint: str, params
                 return data
             else:
                 raise DeezerAPIError(f"HTTP {response.status}: {await response.text()}")
+    except asyncio.TimeoutError:
+        raise DeezerAPIError(f"Request to {endpoint} timed out")
     except aiohttp.ClientError as e:
         raise DeezerAPIError(f"Request failed: {str(e)}")
 
@@ -106,7 +108,7 @@ async def search_tracks(params: SearchParams) -> Dict[str, Any]:
     if params.order != "RANKING":
         search_params["order"] = params.order
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
         try:
             result = await make_api_request(session, "search", search_params)
             return {
@@ -166,7 +168,7 @@ async def advanced_search(params: AdvancedSearchParams) -> Dict[str, Any]:
     if params.order != "RANKING":
         search_params["order"] = params.order
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
         try:
             result = await make_api_request(session, "search", search_params)
             return {
@@ -197,7 +199,7 @@ async def get_track_details(track_id: int) -> Dict[str, Any]:
     Example:
         get_track_details(3135556)
     """
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
         try:
             result = await make_api_request(session, f"track/{track_id}")
             return {"success": True, "track": result}
@@ -220,7 +222,7 @@ async def get_artist_details(artist_id: int) -> Dict[str, Any]:
     Example:
         get_artist_details(27)  # Daft Punk
     """
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
         try:
             result = await make_api_request(session, f"artist/{artist_id}")
             return {"success": True, "artist": result}
@@ -242,7 +244,7 @@ async def get_artist_albums(artist_id: int, limit: int = 25) -> Dict[str, Any]:
         Dict with list of albums including release dates and track counts.
     """
     limit = max(1, min(limit, 100))
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
         try:
             result = await make_api_request(session, f"artist/{artist_id}/albums", {"limit": limit})
             return {
@@ -269,7 +271,7 @@ async def get_artist_top_tracks(artist_id: int, limit: int = 10) -> Dict[str, An
         Dict with the artist's top tracks ranked by popularity.
     """
     limit = max(1, min(limit, 100))
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
         try:
             result = await make_api_request(session, f"artist/{artist_id}/top", {"limit": limit})
             return {
@@ -296,7 +298,7 @@ async def get_artist_related(artist_id: int, limit: int = 10) -> Dict[str, Any]:
         Dict with list of similar/related artists.
     """
     limit = max(1, min(limit, 100))
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
         try:
             result = await make_api_request(session, f"artist/{artist_id}/related", {"limit": limit})
             return {
@@ -324,7 +326,7 @@ async def get_album_details(album_id: int) -> Dict[str, Any]:
     Example:
         get_album_details(302127)
     """
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
         try:
             result = await make_api_request(session, f"album/{album_id}")
             return {"success": True, "album": result}
@@ -347,7 +349,7 @@ async def get_album_tracks(album_id: int) -> Dict[str, Any]:
     Example:
         get_album_tracks(302127)
     """
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
         try:
             result = await make_api_request(session, f"album/{album_id}/tracks")
             return {
@@ -375,7 +377,7 @@ async def get_playlist_details(playlist_id: int) -> Dict[str, Any]:
     Example:
         get_playlist_details(908622995)
     """
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
         try:
             result = await make_api_request(session, f"playlist/{playlist_id}")
             return {"success": True, "playlist": result}
@@ -397,7 +399,7 @@ async def search_artists(query: str, limit: int = 10) -> Dict[str, Any]:
         Dict with matching artists including their IDs, names, and picture URLs.
     """
     limit = max(1, min(limit, 25))
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
         try:
             result = await make_api_request(session, "search/artist", {"q": query, "limit": limit})
             return {
@@ -424,7 +426,7 @@ async def search_albums(query: str, limit: int = 10) -> Dict[str, Any]:
         Dict with matching albums including titles, artists, and cover art URLs.
     """
     limit = max(1, min(limit, 25))
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
         try:
             result = await make_api_request(session, "search/album", {"q": query, "limit": limit})
             return {
@@ -451,7 +453,7 @@ async def search_playlists(query: str, limit: int = 10) -> Dict[str, Any]:
         Dict with matching playlists including titles, track counts, and creator info.
     """
     limit = max(1, min(limit, 25))
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
         try:
             result = await make_api_request(session, "search/playlist", {"q": query, "limit": limit})
             return {
@@ -473,7 +475,7 @@ async def get_genre_list() -> Dict[str, Any]:
     Returns:
         Dict with all genre IDs and names (e.g., Pop, Rock, Hip-Hop, Electronic, etc.)
     """
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
         try:
             result = await make_api_request(session, "genre")
             return {"success": True, "genres": result.get("data", [])}
@@ -495,7 +497,7 @@ async def get_genre_artists(genre_id: int, limit: int = 25) -> Dict[str, Any]:
         Dict with artists associated with the genre.
     """
     limit = max(1, min(limit, 100))
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
         try:
             result = await make_api_request(session, f"genre/{genre_id}/artists", {"limit": limit})
             return {
@@ -523,7 +525,7 @@ async def get_chart(genre_id: int = 0, limit: int = 10) -> Dict[str, Any]:
         Dict with top tracks, albums, artists, and playlists charts.
     """
     limit = max(1, min(limit, 50))
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
         try:
             result = await make_api_request(session, f"chart/{genre_id}", {"limit": limit})
             return {
