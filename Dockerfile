@@ -18,4 +18,4 @@ COPY . .
 EXPOSE 8000
 
 # Command to run the application
-CMD ["uv", "run", "deezer_mcp_server.py"] 
+CMD ["python", "server.py"]
