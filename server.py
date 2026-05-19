@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -190,13 +191,18 @@ def _osa(script: str) -> str:
     return result.stdout.strip()
 
 
+def _osa_str(s: str) -> str:
+    """Escape a Python string for safe inclusion inside AppleScript double quotes."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _macos_detect_player(hint: str = "") -> str | None:
     """Return the first MPRIS-like macOS app that is running, or None."""
     candidates = [hint] if hint else _MACOS_APPS
     for app in candidates:
         running = _osa(
             f'tell application "System Events" to '
-            f'count (processes where name is "{app}")'
+            f'count (processes where name is "{_osa_str(app)}")'
         )
         if running == "1":
             return app
@@ -874,11 +880,14 @@ async def get_battery() -> Dict[str, Any]:
         bat = psutil.sensors_battery()
         if bat is None:
             return {"success": False, "error": "No battery sensor found (desktop or unsupported platform)"}
+        secs = bat.secsleft
+        if secs in (psutil.POWER_TIME_UNLIMITED, psutil.POWER_TIME_UNKNOWN):
+            secs = None
         return {
             "success": True,
             "percent": round(bat.percent, 1),
             "plugged_in": bat.power_plugged,
-            "seconds_remaining": bat.secsleft if bat.secsleft != psutil.POWER_TIME_UNLIMITED else None,
+            "seconds_remaining": secs,
         }
     return await asyncio.to_thread(_collect)
 
@@ -930,10 +939,26 @@ async def list_processes(sort_by: str = "cpu", limit: int = 20) -> Dict[str, Any
     limit = min(limit, 100)
     sort_by = sort_by.lower()
     def _collect():
-        procs = []
-        for p in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent", "status"]):
+        # psutil.cpu_percent() needs two samples to compute a real value, so
+        # prime each process, sleep briefly, then collect actual values.
+        primed = []
+        for p in psutil.process_iter():
             try:
-                procs.append(p.info)
+                p.cpu_percent(None)
+                primed.append(p)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        time.sleep(0.3)
+        procs = []
+        for p in primed:
+            try:
+                procs.append({
+                    "pid": p.pid,
+                    "name": p.name(),
+                    "cpu_percent": p.cpu_percent(None),
+                    "memory_percent": round(p.memory_percent(), 2),
+                    "status": p.status(),
+                })
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
         key_map = {"cpu": "cpu_percent", "memory": "memory_percent", "name": "name"}
@@ -1006,16 +1031,20 @@ async def launch_app(command: str) -> Dict[str, Any]:
     Launch an application or command in the background.
 
     Args:
-        command: Command to run (e.g. "notepad.exe", "gedit", "/usr/bin/vlc").
-                 Shell expansion is not performed — use full paths for reliability.
+        command: Command to run (e.g. "notepad.exe", "gedit", "firefox https://example.com").
+                 Tokenized with shell-style splitting (shlex.split) — quote arguments
+                 that contain spaces. No shell expansion (no globbing, no env vars).
 
     Returns:
         Dict with success flag and the new process PID.
     """
     def _launch():
         try:
+            argv = shlex.split(command, posix=(sys.platform != "win32"))
+            if not argv:
+                return {"success": False, "error": "Empty command"}
             proc = subprocess.Popen(
-                command,
+                argv,
                 shell=False,
                 start_new_session=True,
                 stdout=subprocess.DEVNULL,
@@ -1241,12 +1270,16 @@ async def take_screenshot(monitor: int = 1, save_path: str = "") -> Dict[str, An
         try:
             with mss.mss() as sct:
                 monitors = sct.monitors
-                if monitor >= len(monitors):
+                if monitor < 0 or monitor >= len(monitors):
                     return {"success": False,
                             "error": f"Monitor {monitor} not found. Available: 0-{len(monitors)-1}"}
                 target = monitors[monitor]
                 img = sct.grab(target)
-                path = save_path if save_path else tempfile.mktemp(suffix=".png")
+                if save_path:
+                    path = save_path
+                else:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as f:
+                        path = f.name
                 mss.tools.to_png(img.rgb, img.size, output=path)
                 return {"success": True, "path": path,
                         "width": img.width, "height": img.height}
@@ -1285,8 +1318,8 @@ async def send_notification(title: str, message: str, timeout: int = 5) -> Dict[
                 )
                 return {"success": True}
             elif sys.platform == "darwin":
-                script = (f'display notification "{message}" '
-                          f'with title "{title}"')
+                script = (f'display notification "{_osa_str(message)}" '
+                          f'with title "{_osa_str(title)}"')
                 _osa(script)
                 return {"success": True}
             return {"success": False, "error": "Notifications not supported on this platform"}
@@ -1314,7 +1347,9 @@ async def open_url(url: str) -> Dict[str, Any]:
     """
     def _open():
         try:
-            webbrowser.open(url)
+            opened = webbrowser.open(url)
+            if not opened:
+                return {"success": False, "error": "No default browser found"}
             return {"success": True, "url": url}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -1379,11 +1414,13 @@ async def lock_screen() -> Dict[str, Any]:
                         continue
                 return {"success": False, "error": "No lock command found (tried loginctl, xdg-screensaver, gnome-screensaver-command)"}
             elif sys.platform == "darwin":
-                subprocess.run(
-                    ["osascript", "-e",
-                     'tell application "System Events" to keystroke "q" using {command down, control down}'],
-                    timeout=5,
+                # CGSession -suspend locks without needing Accessibility permission
+                # (which the keystroke fallback would require).
+                cgsession = (
+                    "/System/Library/CoreServices/Menu Extras/User.menu/"
+                    "Contents/Resources/CGSession"
                 )
+                subprocess.run([cgsession, "-suspend"], check=True, timeout=5)
                 return {"success": True}
             return {"success": False, "error": "Lock not supported on this platform"}
         except Exception as e:
